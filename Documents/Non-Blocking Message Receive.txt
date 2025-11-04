@@ -1,0 +1,43 @@
+As we are using nonblocking message receive for P5, you have to change the logic compared to blocking wait. That is because the msgrcv function will return -1 if it gets no message or gets an error.
+
+ 
+
+The code below shows an example of how to check for an error, for no message, or an actual message (note in practice you would NOT want the "got no message" each check of this or it would spam your screen":
+
+if(msgrcv(msqid, &message, sizeof(message.data),getpid(),IPC_NOWAIT)==-1)
+
+             {
+
+                     if(errno == ENOMSG)
+
+                     {
+
+                                printf("Got no message\n");
+
+                     }
+
+                     else
+
+                     {
+
+                             printf("Got an error from msgrcv\n");
+
+                             perror("msgrcv");
+
+                             exit(1);
+
+                     }
+
+              }
+
+              else
+
+              {
+
+                        printf("Recived %d from worker\n",message.data);
+
+                        exit(0);
+
+              }
+
+        }
