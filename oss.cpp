@@ -171,7 +171,7 @@ int main(int argc, char* argv[]) {
                 logfile = optarg;
                 break;
             default:
-                std::cerr << "ERROR: Invalid option. Use -h for help.\n";
+                std::cerr << "[ERROR] Invalid option. Use -h for help.\n";
                 return 1;
         }
     }
@@ -660,36 +660,67 @@ lfprintf(logf, "]\n");
             continue;
         }
 
-        /* HANDLE RESOURCE REQUESTS FROM WORKER PROCESSES
-        (allows oss to asynchronously handle resource requests from multiple workers)
-            - [msg]: struct to store incoming message
+        /* MSG QUEUE TO HANDLE INCOMING RESOURCE REQUESTS FROM WORKER PROCESSES
+        (allows oss to asynchronously handle resource requests, respond, and keep record of resource allocation)
+            - [msg]: MsgBuf structure to store incoming message
             - [msgrcv]: called with [msqid]
-            - pointer to [msg]
-            - size of message
-            - msgtype = 0 (receive any type)
-            - [IPC_NOWAIT]: non-blocking
-            - if message received (rcv > 0), find index of process that sent message by matching mtype (PID)
-            - if matching process found,
-                - [tryGrantRequest]: attempt to grant resource request; returns 1 if granted, 0 if blocked
-                - prepare reply message with mtype = PID + 1000
+                - [msqid]: pointer to [msg]
+                    - [msg]: size of message
+                    - msgtype = 0 (receive any type)
+            - [IPC_NOWAIT]: non-blocking flag; if no message available, return immediately with -1
         */
         MsgBuf msg;
         ssize_t rcv = msgrcv(msqid, &msg, sizeof(MsgBuf) - sizeof(long), 0, IPC_NOWAIT);
-        if (rcv > 0) {
+
+        // If NO message received (rcv == -1), check if errno == ENOMSG
+            // If true, no messages available to process, continue main loop
+            // Else, print error and exit
+        if (rcv == -1) {
+            if (errno == ENOMSG) {
+            } else {
+                std::cerr << "OSS: ERROR from msgrcv in resource request section." << std::endl;
+                perror("msgrcv");
+                exit(1);
+            }
+        } else {
+            // Message received from worker
             // Find process index by PID
             int procIndex = -1;
-            for (int i = 0; i < MAX_PROCS; ++i)
-                if (processTable[i].occupied && processTable[i].pid == msg.mtype)
+            for (int i = 0; i < MAX_PROCS; ++i) {
+                if (processTable[i].occupied && processTable[i].pid == msg.mtype) {
                     procIndex = i;
+                    break;
+                }
+            }
+            // If message IS received, find process that sent it by watching message's mtype (sender's PID) with PID in process table
             if (procIndex != -1) {
+                // [tryGrantRequest]: if matching process found, try to grant the resource request
                 int granted = tryGrantRequest(procIndex, msg.resourceRequest);
+
+                // Prepare reply message
+                // mtype = sender's PID + 1000 (so worker can differentiate replies)
                 MsgBuf reply;
                 reply.mtype = processTable[procIndex].pid + 1000;
                 reply.result = granted ? 1 : 0;
-                msgsnd(msqid, &reply, sizeof(MsgBuf) - sizeof(long), 0);
+
+                // [msgsnd]: send reply message to worker
+                // result = 1 if request granted; 0 if denied
+                if (msgsnd(msqid, &reply, sizeof(MsgBuf) - sizeof(long), 0) == -1) {
+                    std::cerr << "OSS: ERROR sending reply to worker." << std::endl;
+                    perror("msgsnd");
+                    exit(1);
+                }
+
+                // Print/log result
+                if (granted) {
+                    std::cout << "OSS granting PID " << processTable[procIndex].pid << " resource request." << std::endl;
+                    lfprintf(logf, "OSS granting PID %d resource request.\n", processTable[procIndex].pid);
+                } else {
+                    std::cout << "OSS: Not enough resources for PID " << processTable[procIndex].pid << ", request blocked." << std::endl;
+                    lfprintf(logf, "OSS: Not enough resources for PID %d, request blocked.\n", processTable[procIndex].pid);
+                }
             }
         }
-    }
 
     // If terminateFlag set, send SIGTERM to all active workers
     if (terminateFlag) {
